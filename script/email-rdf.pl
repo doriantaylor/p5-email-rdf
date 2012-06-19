@@ -20,24 +20,38 @@ sub bless_message {
 
 package main;
 
-use Path::Class ();
+use Path::Class    ();
+use File::MimeInfo ();
 
 Getopt::Long::Configure(qw(no_ignore_case));
 
 my %options = (
-#    attach => '/tmp/
+    attach => Path::Class::Dir->new('/tmp/email-rdf'),
 );
 
 Getopt::Long::GetOptions(
-    'a|attachments=s' => \$options{attach},
+    'a|attachments=s' => sub { $options{attach} = Path::Class::Dir->new($_[1])},
 );
 
-my $emrdf = Email::RDF->new(%options);
+$options{attach}->mkpath;
+
+my $emrdf = Email::RDF->new; #(%options);
 
 for my $f (@ARGV) {
     my $folder = My::Email::Folder->new($f) or die $!;
 
     $emrdf->add($folder->messages);
+}
+
+for my $id ($emrdf->attachments) {
+    my ($data, $type) = $emrdf->attachment($id);
+    warn $type;
+    my $ext = File::MimeInfo::extensions($type);
+    my $fn  = $ext ? $id->hexdigest(1) . ".$ext" : $id->hexdigest(1);
+    warn $fn;
+    open my $fh, '>', $options{attach}->file($fn) or die $!;
+    binmode $fh;
+    syswrite $fh, $$data;
 }
 
 binmode STDOUT, ':utf8';

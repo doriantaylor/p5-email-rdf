@@ -186,6 +186,12 @@ has xpc => (
         $x },
 );
 
+has _attach => (
+    is => 'ro',
+    lazy => 1,
+    default => sub { {} },
+);
+
 sub link_nodes {
     my ($self, $doc) = @_;
     $self->xpc->findnodes($self->driver->link_xpath, $doc);
@@ -245,8 +251,8 @@ my %MULTIPART = (
 
 my %WHOLE = (
     'message/rfc822'        => \&_message_rfc822,
-    'text/html'             => \&_text_html,
-    'application/xhtml+xml' => \&_text_html,
+#    'text/html'             => \&_text_html,
+#    'application/xhtml+xml' => \&_text_html,
 #    'text/plain'            => \&_text_plain,
 );
 
@@ -395,6 +401,15 @@ sub _multipart_alternative {
                 push @statements, $self->_text_references($content, $mid);
                 push @statements, $self->driver->add_content($mid, $content);
             }
+            elsif ($ct =~ m!^(?:text/html|application/xhtml+xml)!) {
+                my $content = $self->_text_html($subpart, $mid, 1);
+                if ($content) {
+                    my $string  = $content->toString;
+                    my $id      = URI::di->compute(\$string);
+                    push @statements, $self->_html_references($content, $mid);
+                    push @statements, $self->driver->add_format($mid, $id);
+                }
+            }
             else {
                 my $id = $self->_process_representation($subpart);
                 # if the body is something else, process it as dct:hasFormat
@@ -508,13 +523,11 @@ sub _text_html {
         #    warn $msg->as_string;
         #}
 
-        my $dom = eval { XML::LibXML->load_xml
+        my $doc = eval { XML::LibXML->load_xml
               (string => $tidied, { recover => 0, no_network => 1 }) };
-        if ($dom) {
-            # for my $node ($dom->findnodes
-            #                   (q{//*[starts-with(local-name(), 'defanged') or starts-with(local-name(), 'DEFANGED')]})) {
-            #     warn $node->name;
-            # }
+        if ($doc) {
+            #warn $doc;
+            return $doc;
         }
         else {
             warn $@;
@@ -524,44 +537,43 @@ sub _text_html {
     else {
         warn "can't tidy :(";
     }
-    # if ($dom) {
-    #     # remove defanged
-    #     for my $node ($dom->findnodes
-    #                       (q{//*[starts-with(local-name(), 'defanged')]})) {
-    #         warn $node->name;
-    #     }
-    # }
-    # else {
-    #     warn 'wat no html';
-    #     warn $part->body;
-    # }
 
-    return ();
+    return;
 }
 
 sub _html_references {
     my ($self, $doc, $mid) = @_;
 
-    my ($base) = $self->xpc->findnodes('/html:html/html:head/html:base[1]');
+    my ($base) = $self->xpc->findnodes
+        ('/html:html/html:head/html:base[1]', $doc);
     if ($base) {
         $base = $base->getAttribute('href');
     }
 
     my @statements;
     for my $link ($self->link_nodes($doc)) {
-        push @statements, $self->driver->add_html_link($mid, $link, $base);
+        push @statements, $self->driver->add_html_links($mid, $link, $base);
     }
     @statements;
 }
 
 sub _generic_attachment {
     my ($self, $part, $mid) = @_;
-    warn 'harro generic: ' . $part->content_type;
+    #warn 'harro generic: ' . $part->content_type;
+
+    my @statements;
 
     my $body = $part->body;
     my $id   = URI::di->compute($body);
+    my $ct   = $part->content_type;
 
-    return ();
+    $ct =~ s/^\s*(.*?)(?:;.*)\s*$/\L$1/;
+
+    push @statements, $self->driver->add_type($id, $ct);
+
+    $self->_attach->{$id} ||= [\$body, $ct];
+
+    @statements;
 }
 
 sub _process_mimepart {
@@ -580,7 +592,6 @@ sub _process_mimepart {
     # check headers
 
     push @statements, $self->driver->map_headers($mid, $part->header_obj);
-
     push @statements, $self->_dispatch_part($part, $mid);
 
     if ($part->subparts) {
@@ -588,9 +599,15 @@ sub _process_mimepart {
     }
     else {
         # save the body, default sha-256
-        my $id = URI::di->compute($part->body);
+        my $body = $part->body;
+        my $id = URI::di->compute($body);
+        my $ct = $part->content_type;
+        $ct =~ s/^\s*(.*?)(?:;.*)\s*$/\L$1/;
+
+        push @statements, $self->driver->add_type($id, $ct);
+
         #warn $id;
-        $self->{attach}{$id} = $part;
+        $self->_attach->{$id} ||= [\$body, $ct];
     }
 
     # check mime parts
@@ -609,7 +626,6 @@ sub _process_mimepart {
 
     @statements;
 }
-
 
 sub _process {
     my ($self, $container, $thread, $parent) = @_;
@@ -677,6 +693,7 @@ Returns the list of attachment digest URIs (see L<URI::di>).
 
 sub attachments {
     my $self = shift;
+    return map { URI->new($_) } keys %{$self->_attach};
 }
 
 =head2 attachment $URI
@@ -714,6 +731,9 @@ context, just the attachment reference itself:
 =cut
 
 sub attachment {
+    my ($self, $id) = @_;
+    return unless my $a = $self->_attach->{$id};
+    wantarray ? @$a : $a->[0];
 }
 
 =head2 mint_uuid

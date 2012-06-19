@@ -9,6 +9,8 @@ use namespace::autoclean;
 extends 'Email::RDF::Driver';
 
 use RDF::Trine;
+use DateTime::Format::Mail;
+use Email::Address;
 
 # bootstrap
 my $NS = RDF::Trine::NamespaceMap->new({
@@ -139,9 +141,19 @@ sub set_parent {
 sub _mailto {
     my $hdr = shift;
     # XXX replace with Email::Address
-    $hdr =~ s/^.*?<([^>]*)>.*/$1/;
-    my $mt = URI->new('mailto:' . $hdr)->canonical;
-    RDF::Trine::Node::Resource->new("$mt");
+    my @addresses = map {
+        $_->address =~ /^\s*(.*?)\s*$/; $1 } Email::Address->parse($hdr);
+    #$hdr =~ s/^.*?<([^>]*)>.*/$1/;
+    return map {
+        my $mt = URI->new('mailto:' . $_)->canonical;
+        RDF::Trine::Node::Resource->new("$mt");
+    } @addresses;
+}
+
+sub _date {
+    my $hdr = shift;
+    my $dt = DateTime::Format::Mail->parse_datetime($hdr);
+    RDF::Trine::Node::Literal->new("${dt}Z", undef, $NS->xsd('dateTime'));
 }
 
 sub _literal {
@@ -156,6 +168,7 @@ sub map_headers {
         'Bcc'     => [$NS->sioc('addressed_to'), \&_mailto],
         'From'    => [$NS->dct('creator'),       \&_mailto],
         'Subject' => [$NS->dct('title'),        \&_literal],
+        'Date'    => [$NS->dct('created'),         \&_date],
     );
 
     my $s = RDF::Trine::Node::Resource->new("$message");
@@ -164,8 +177,10 @@ sub map_headers {
     for my $k (keys %x) {
         my $val = $headers->header($k);
         if (defined $val) {
-            my $o = $x{$k}[1]->($val);
-            push @statements, RDF::Trine::Statement->new($s, $x{$k}[0], $o);
+            my @o = $x{$k}[1]->($val);
+            for my $o (@o) {
+                push @statements, RDF::Trine::Statement->new($s, $x{$k}[0], $o);
+            }
         }
     }
     @statements;
@@ -249,23 +264,34 @@ sub add_type {
 =cut
 
 sub add_html_links {
-    my ($self, $message, $node, $base) = @_;
+    my ($self, $subject, $node, $base, $mid) = @_;
+
+    # the subject is not necessarily the message-id
+    $mid ||= $subject if $subject->scheme eq 'mid';
 
     my @statements;
+
+    #warn $node->localName;
 
     if (my $which = $HTML{$node->localName}) {
         $base = URI->new($base) if defined $base;
 
-        my $s = RDF::Trine::Node::Resource->new("$message");
+        my $s = RDF::Trine::Node::Resource->new("$subject");
 
         for my $attr (keys %{$which}) {
             next unless $node->hasAttribute($attr);
+            #warn "wee $attr";
 
             my $uri = $node->getAttribute($attr);
+            $uri =~ s/^\s*(.*?)\s*$/$1/;
             $uri = $base ? URI->new_abs($uri, $base) : URI->new($uri);
 
             # don't include relative URIs
             if ($uri->scheme) {
+                # absolutize the cid if we can
+                $uri = $mid->clone->cid($uri)
+                    if ($mid and $uri->scheme eq 'cid');
+
                 my $p = $which->{$attr};
                 my $o = RDF::Trine::Node::Resource->new("$uri");
                 push @statements, RDF::Trine::Statement->new($s, $p, $o);
