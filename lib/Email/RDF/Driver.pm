@@ -21,21 +21,18 @@ our $VERSION = '0.01';
 
 =head1 SYNOPSIS
 
-Quick summary of what the module does.
+    package My::Driver;
 
-Perhaps a little code snippet.
+    use Moose;
 
-    use Email::RDF;
+    extends 'Email::RDF::Driver';
 
-    my $foo = Email::RDF->new();
-    ...
+    # do stuff like implement your own behaviour
 
-=head1 EXPORT
+=head1 METHODS
 
-A list of functions that can be exported.  You can delete this section
-if you don't export anything, such as for a purely object-oriented module.
-
-=head1 SUBROUTINES/METHODS
+One of these days, the contents of L<Email::RDF::Driver::SIOC> will be
+generalized here.
 
 =head2 function1
 

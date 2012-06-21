@@ -251,6 +251,7 @@ my %MULTIPART = (
 
 my %WHOLE = (
     'message/rfc822'        => \&_message_rfc822,
+    # dude message/external-body is kinda cray
 #    'text/html'             => \&_text_html,
 #    'application/xhtml+xml' => \&_text_html,
 #    'text/plain'            => \&_text_plain,
@@ -268,6 +269,15 @@ sub _dispatch_part {
 
     # run the selected subroutine
     $self->$sub($part, $mid, $hdr);
+}
+
+sub _dispatch_multipart {
+}
+
+sub _dispatch_attachment {
+}
+
+sub _dispatch_content {
 }
 
 # a message
@@ -294,6 +304,8 @@ sub _multipart_mixed {
     my ($self, $part, $mid) = @_;
 
     # warn 'harro mixed';
+
+    #/my ($maybe_content, @attachments) = $part->subparts;
 
     my @statements;
 
