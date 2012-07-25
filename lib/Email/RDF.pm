@@ -15,6 +15,8 @@ use URI::mid      ();
 use URI::di       ();
 # aw yiss
 use URI::Find::Schemeless ();
+# this was hiding on me all along
+use Email::MIME::ContentType ();
 
 # lying headers!
 use Encode        ();
@@ -280,12 +282,26 @@ sub _dispatch_attachment {
 sub _dispatch_content {
 }
 
+sub _process_multipart {
+}
+
+sub _process_body {
+    my ($self, $part, $mid, $relationship) = @_;
+
+    # if the body is content, behave one way
+    # if the body is an attachment, behave the other way
+    # non-root components of multipart/related behave a third way
+}
+
+sub _process_attachment {
+}
+
 # a message
 sub _message_rfc822 {
     my ($self, $part, $parent) = @_;
     my @statements;
 
-    my $mid    = URI->new('mid:' . $part->header('Message-ID'));
+    #my $mid    = URI->new('mid:' . $part->header('Message-ID'));
     my $driver = $self->driver;
 
     #push @statements, $driver->new_message($mid);
@@ -305,7 +321,7 @@ sub _multipart_mixed {
 
     # warn 'harro mixed';
 
-    #/my ($maybe_content, @attachments) = $part->subparts;
+    #my ($maybe_content, @attachments) = $part->subparts;
 
     my @statements;
 
@@ -330,7 +346,7 @@ sub _multipart_mixed {
                 my $c = URI::cid->parse($cid);
                 my $m = $mid->clone;
                 $cid  = $m->cid($c);
-                warn $cid;
+                #warn $cid;
             }
 
             if ($disp =~ /^\s*attachment/i) {
@@ -382,10 +398,37 @@ sub _multipart_related {
     for my $subpart ($part->subparts) {
         # trace if multipart
         if ($subpart->subparts) {
+            push @statements, $self->_dispatch_part($subpart, $mid);
         }
         else {
             # every subpart that isn't itself multipart is connected to the
             # parent by, e.g., dct:hasPart
+
+            my $ct = lc($subpart->content_type || '');
+            $ct =~ s/^\s*(.*?)(\s*;.*)?$/\L$1/;
+            if ($ct =~ m!^text/plain!) {
+                # if the body is text, process it as a literal as
+                # sioc:content
+                my $content = $self->_text_plain($subpart, $mid, 1);
+                push @statements, $self->_text_references($content, $mid);
+                push @statements, $self->driver->add_content($mid, $content);
+            }
+            elsif ($ct =~ m!^(?:text/html|application/xhtml+xml)!) {
+                my $content = $self->_text_html($subpart, $mid, 1);
+                if ($content) {
+                    my $string  = $content->toString;
+                    my $id      = URI::di->compute(\$string);
+                    $self->_attach->{$id} ||= [\$string, $ct];
+
+                    push @statements, $self->_html_references($content, $mid);
+                    push @statements, $self->driver->add_format($mid, $id);
+                }
+            }
+            else {
+                my $id = $self->_process_representation($subpart);
+                # if the body is something else, process it as dct:hasFormat
+                push @statements, $self->driver->add_part($mid, $id);
+            }
         }
     }
 
@@ -406,6 +449,7 @@ sub _multipart_alternative {
         }
         else {
             my $ct = lc($subpart->content_type || '');
+            $ct =~ s/^\s*(.*?)(\s*;.*)?$/\L$1/;
             if ($ct =~ m!^text/plain!) {
                 # if the body is text, process it as a literal as
                 # sioc:content
@@ -418,6 +462,8 @@ sub _multipart_alternative {
                 if ($content) {
                     my $string  = $content->toString;
                     my $id      = URI::di->compute(\$string);
+                    $self->_attach->{$id} ||= [\$string, $ct];
+
                     push @statements, $self->_html_references($content, $mid);
                     push @statements, $self->driver->add_format($mid, $id);
                 }
@@ -465,13 +511,30 @@ sub _text_plain {
     # we are re-encoding and trimming whitespace. Not sure at this
     # time how it ought to behave.
 
-    my $body    = $part->body;
-    my $decoder = eval { Encode::Guess::guess_encoding
-          ($body, qw(ascii latin1 utf8 utf16 utf32)) };
-    $body = $decoder->decode($body) if $decoder;
+    my @charsets = qw();
+
+    my $x = Email::MIME::ContentType::parse_content_type($part->content_type);
+    if ($x and $x->{attributes} and $x->{attributes}{charset}) {
+        #warn $x->{attributes}{charset};
+        unshift @charsets, $x->{attributes}{charset};
+    }
+
+    my $body = $part->body;
+    if ($body =~ /^[\x00-\x7f]$/sm) {
+        # apparently the occasional windows-1252 message gets the high
+        # bit killed in transit?
+        $body =~ s/([\x00\x02-\x08\x0b\x0c\x0e\x11-\x1c\x1e\x1f])/
+            chr(ord($1) | 0x80)/xegsm;
+        unshift @charsets, 'windows-1252' if $1;
+    }
+
+    my $decoder = eval { Encode::Guess::guess_encoding($body, @charsets) };
+    $body = $decoder->decode($body) if ref $decoder;
+    warn $@ unless $decoder;
 
     # get rid of leading and trailing whitespace
     $body =~ s/^\s*(.*?)\s*$/$1/s;
+    $body =~ s/\r//sg;
 
     return $body if $literal;
 
@@ -523,6 +586,10 @@ sub _text_html {
         $tidied =~ s/(xmlns:st\s*=\s*)['"]\s*(?:\x01|\&\#[x]?0*1;|)\s*['"]
                     /xmlns:st="$wtf"/gsx;
 
+        # seriously???
+        $tidied =~ s/(xmlns:u3\s*=\s*)['"]\s*(?:\x01|\&\#[x]?0*1;|)\s*['"]
+                    /xmlns:u3="urn:x-wtf-microsoft:"/gsx;
+
         # also wtf @ this
         $tidied =~ s!xmlns(:.*?)?
                      \s*=\s*['"]\s*http://www.w3.org/TR/REC-html40\s*['"]
@@ -536,7 +603,7 @@ sub _text_html {
         #}
 
         my $doc = eval { XML::LibXML->load_xml
-              (string => $tidied, { recover => 0, no_network => 1 }) };
+              (string => $tidied, { recover => 1, no_network => 1 }) };
         if ($doc) {
             #warn $doc;
             return $doc;
@@ -590,11 +657,6 @@ sub _generic_attachment {
 
 sub _process_mimepart {
     my ($self, $part, $mid) = @_;
-    if (defined $mid) {
-        # this is a subpart.
-
-        # so ifi 
-    }
 
     $mid ||= URI::mid->parse($part->header('Message-Id'));
     #warn $mid;
@@ -604,22 +666,41 @@ sub _process_mimepart {
     # check headers
 
     push @statements, $self->driver->map_headers($mid, $part->header_obj);
-    push @statements, $self->_dispatch_part($part, $mid);
 
     if ($part->subparts) {
         # drill down to subparts
+        push @statements, $self->_dispatch_part($part, $mid);
     }
     else {
         # save the body, default sha-256
-        my $body = $part->body;
-        my $id = URI::di->compute($body);
         my $ct = $part->content_type;
         $ct =~ s/^\s*(.*?)(?:;.*)\s*$/\L$1/;
 
-        push @statements, $self->driver->add_type($id, $ct);
+        if ($ct =~ m!^text/plain!) {
+            my $content = $self->_text_plain($part, $mid, 1);
+            push @statements, $self->_text_references($content, $mid);
+            push @statements, $self->driver->add_content($mid, $content);
+        }
+        else {
+            my $body;
+            if ($ct =~ m!^(?:text/html|application/xhtml+xml)!) {
+                if (my $content = $self->_text_html($part, $mid, 1)) {
+                    $body = $content->toString;
+                    push @statements, $self->_html_references($content, $mid);
+                }
+            }
+            else {
+                $body = $part->body;
+            }
 
-        #warn $id;
-        $self->_attach->{$id} ||= [\$body, $ct];
+            if (defined $body) {
+                my $id = URI::di->compute($body);
+                $self->_attach->{$id} ||= [\$body, $ct];
+
+                push @statements, $self->driver->add_format($mid, $id);
+                push @statements, $self->driver->add_type($id, $ct);
+            }
+        }
     }
 
     # check mime parts
@@ -662,6 +743,8 @@ sub _process {
     push @statements, $self->_process_mimepart($container->message)
         if $container->message;
 
+    warn $container->message->debug_structure if $container->message;
+
     # now recurse to the other messages
     push @statements, $self->_process($container->child, $thread, $mid)
         if $container->child;
@@ -682,15 +765,24 @@ sub add {
     $threader->thread;
 
     for my $root ($threader->rootset) {
-        # create a thread object
-        my $thread = $self->mint_uuid;
+        # first things first
+        $root = $root->child if $root->messageid eq 'subject dummy';
 
-        my @statements = $self->driver->create_thread($thread);
+        # get the thread id out of the model
+        my $mid    = URI->new('mid:' . $root->messageid);
+        my $thread = $self->driver->thread_for($self->model, $mid);
+        my @statements;
+        unless ($thread) {
+            $thread = $self->mint_uuid;
+            push @statements, $self->driver->create_thread($thread);
+        }
 
         push @statements, $self->_process($root, $thread);
 
         # slurp up all the statements
         map { $self->model->add_statement($_) } @statements;
+
+        warn $thread;
     }
 
     # return the number of messages processed

@@ -20,13 +20,23 @@ sub bless_message {
 
 package main;
 
-use Path::Class    ();
-use File::MimeInfo ();
+use Path::Class ();
+use MIME::Types ();
+use RDF::Trine  ();
+use DBI         ();
+
+my $MT = MIME::Types->new;
+$MT->addType(MIME::Type->new(
+    type       => 'application/x-zip-compressed',
+    extensions => [qw(zip)])
+);
 
 Getopt::Long::Configure(qw(no_ignore_case));
 
 my %options = (
     attach => Path::Class::Dir->new('/tmp/email-rdf'),
+    dsn    => 'dbi:Pg:dbname=trine',
+    store  => 'common',
 );
 
 Getopt::Long::GetOptions(
@@ -35,7 +45,12 @@ Getopt::Long::GetOptions(
 
 $options{attach}->mkpath;
 
-my $emrdf = Email::RDF->new; #(%options);
+my $dbh   = DBI->connect(@options{qw(dsn user pass)}) or die $!;
+my $store = RDF::Trine::Store::DBI->new($options{store}, $dbh);
+
+my $emrdf = Email::RDF->new(
+    model => RDF::Trine::Model->new($store),
+); #(%options);
 
 for my $f (@ARGV) {
     my $folder = My::Email::Folder->new($f) or die $!;
@@ -45,10 +60,12 @@ for my $f (@ARGV) {
 
 for my $id ($emrdf->attachments) {
     my ($data, $type) = $emrdf->attachment($id);
-    warn $type;
-    my $ext = File::MimeInfo::extensions($type);
-    my $fn  = $ext ? $id->hexdigest(1) . ".$ext" : $id->hexdigest(1);
-    warn $fn;
+    #warn $type;
+    my $mt    = $MT->type($type) or warn $type;
+    my ($ext) = $mt->extensions;
+    $ext = 'xml' if $ext and $ext eq 'html';
+    my $fn    = $ext ? $id->b64digest(1) . ".$ext" : $id->b64digest(1);
+    #warn $fn;
     open my $fh, '>', $options{attach}->file($fn) or die $!;
     binmode $fh;
     syswrite $fh, $$data;

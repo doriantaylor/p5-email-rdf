@@ -302,6 +302,30 @@ sub add_html_links {
     @statements;
 }
 
+sub add_part {
+    my ($self, $message, $target) = @_;
+    my $s = RDF::Trine::Node::Resource->new("$message");
+    my $o = RDF::Trine::Node::Resource->new("$target");
+
+    RDF::Trine::Statement->new($s, $NS->dct('hasPart'), $o);
+}
+
+sub thread_for {
+    my ($self, $model, $mid) = @_;
+
+    my $m = $mid->isa('RDF::Trine::Node') ? $mid :
+        RDF::Trine::Node::Resource->new("$mid");
+
+    for my $container ($model->subjects($NS->sioc('container_of'), $m)) {
+        # XXX of course this will only return the first thread found
+        if ($model->get_statements
+                ($container, $NS->rdf('type'), $NS->sioc('Thread'))) {
+            return URI->new($container->value);
+        }
+    }
+
+}
+
 =head1 AUTHOR
 
 Dorian Taylor, C<< <dorian at cpan.org> >>
